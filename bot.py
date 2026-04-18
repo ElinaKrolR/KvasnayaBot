@@ -2220,15 +2220,13 @@ async def healthcheck(message: types.Message):
     """Для проверки работоспособности бота на Render"""
     if message.from_user.id == TRAINER_ID:
         await message.answer("✅ Бот работает!")
-
-async def on_startup():
+async def on_startup(app: web.Application):
     """Устанавливает webhook при запуске бота"""
-    # Render сам подставляет RENDER_EXTERNAL_HOSTNAME
     webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
     await bot.set_webhook(webhook_url)
     print(f"✅ Webhook установлен на: {webhook_url}")
 
-async def on_shutdown():
+async def on_shutdown(app: web.Application):
     """Удаляет webhook при остановке"""
     await bot.delete_webhook()
     await bot.session.close()
