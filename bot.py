@@ -2242,6 +2242,11 @@ async def main():
     # Создаём aiohttp приложение
     app = web.Application()
     
+    # Добавляем healthcheck для Render
+    async def healthcheck_handler(request):
+        return web.Response(text="OK", status=200)
+    app.router.add_get("/healthcheck", healthcheck_handler)
+    
     # Настраиваем обработчик webhook
     webhook_handler = SimpleRequestHandler(
         dispatcher=dp,
@@ -2254,13 +2259,20 @@ async def main():
     app.on_shutdown.append(on_shutdown)
     setup_application(app, dp, bot=bot)
     
-    # Берём порт из переменной окружения (Render подставляет автоматически)
-    port = int(os.environ.get("PORT", 8080))
-    async def healthcheck_handler(request):
-        return web.Response(text="OK", status=200)
+    # Берём порт из переменной окружения
+    port = int(os.environ.get("PORT", 10000))
+    
+    # Запускаем сервер правильно (без вложенных event loop'ов)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host="0.0.0.0", port=port)
+    await site.start()
+    
+    print(f"🚀 Сервер успешно запущен на порту {port}")
+    print(f"✅ Webhook должен быть зарегистрирован по адресу: https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}")
+    
+    # Бесконечно держим сервер включённым
+    await asyncio.Event().wait()
 
-    app.router.add_get("/healthcheck", healthcheck_handler)
-    # Запускаем веб-сервер (а не polling!)
-    web.run_app(app, host="0.0.0.0", port=port)
 if __name__ == "__main__":
     asyncio.run(main())
