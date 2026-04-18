@@ -1,8 +1,11 @@
 import asyncio
+import os
 import re
 import sqlite3
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web 
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -14,6 +17,7 @@ from keyboards import *
 
 # Инициализация
 bot = Bot(token=BOT_TOKEN)
+WEBHOOK_PATH = f"/{BOT_TOKEN}"  # ← ДОБАВЬ ЭТУ СТРОКУ
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -2211,11 +2215,52 @@ async def check_slots(callback: types.CallbackQuery):
         )
     await callback.answer()
 
+@dp.message(Command("healthcheck"))
+async def healthcheck(message: types.Message):
+    """Для проверки работоспособности бота на Render"""
+    if message.from_user.id == TRAINER_ID:
+        await message.answer("✅ Бот работает!")
+
+async def on_startup():
+    """Устанавливает webhook при запуске бота"""
+    # Render сам подставляет RENDER_EXTERNAL_HOSTNAME
+    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
+    await bot.set_webhook(webhook_url)
+    print(f"✅ Webhook установлен на: {webhook_url}")
+
+async def on_shutdown():
+    """Удаляет webhook при остановке"""
+    await bot.delete_webhook()
+    await bot.session.close()
+    print("🔴 Webhook удалён, бот остановлен")
+    
 async def main():
     init_db()
-    print("🤖 Бот запущен!")
+    print("🤖 Бот запускается в режиме WEBHOOK!")
     print(f"👨‍💼 Тренер ID: {TRAINER_ID}")
-    await dp.start_polling(bot)
+    
+    # Создаём aiohttp приложение
+    app = web.Application()
+    
+    # Настраиваем обработчик webhook
+    webhook_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    )
+    webhook_handler.register(app, path=WEBHOOK_PATH)
+    
+    # Настраиваем startup/shutdown хуки
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    setup_application(app, dp, bot=bot)
+    
+    # Берём порт из переменной окружения (Render подставляет автоматически)
+    port = int(os.environ.get("PORT", 8080))
+    async def healthcheck_handler(request):
+        return web.Response(text="OK", status=200)
 
+    app.router.add_get("/healthcheck", healthcheck_handler)
+    # Запускаем веб-сервер (а не polling!)
+    web.run_app(app, host="0.0.0.0", port=port)
 if __name__ == "__main__":
     asyncio.run(main())
