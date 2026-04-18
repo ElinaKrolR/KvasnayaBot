@@ -1,8 +1,7 @@
-# Токен вашего бота от @BotFather
-BOT_TOKEN = "8745174734:AAE2145a8xpMzk4zU-DKp97lkNUD0v2b3nw"
-
-# ID тренера (узнайте через @userinfobot)
-TRAINER_ID =  1073737882 #407767931
+import os
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+TRAINER_ID = int(os.environ.get("TRAINER_ID", 1073737882))
+# ... остальные настройки
 
 # Рабочие часы тренера
 WORK_HOURS_START =9     # 9:00
