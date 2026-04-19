@@ -344,7 +344,6 @@ async def close_week_slots(week_start: str) -> int:
     conn = await get_connection()
     result = await conn.execute("DELETE FROM open_slots WHERE week_start = $1", week_start)
     await conn.close()
-    # Парсим количество удаленных строк
     try:
         return int(result.split()[-1])
     except:
@@ -424,6 +423,32 @@ async def deactivate_recurring_booking(booking_id: int) -> bool:
     result = await conn.execute("UPDATE recurring_bookings SET is_active = FALSE WHERE id = $1", booking_id)
     await conn.close()
     return result != "UPDATE 0"
+
+async def update_recurring_booking(booking_id: int, new_weekday: int, new_time: str) -> bool:
+    conn = await get_connection()
+    result = await conn.execute('''
+        UPDATE recurring_bookings 
+        SET weekday = $1, time = $2 
+        WHERE id = $3 AND is_active = TRUE
+    ''', new_weekday, new_time, booking_id)
+    await conn.close()
+    return result != "UPDATE 0"
+
+async def update_recurring_end_date(booking_id: int, end_date: str) -> bool:
+    conn = await get_connection()
+    result = await conn.execute("UPDATE recurring_bookings SET end_date = $1 WHERE id = $2", end_date, booking_id)
+    await conn.close()
+    return result != "UPDATE 0"
+
+async def get_recurring_bookings_by_user(user_id: int) -> List[Dict]:
+    conn = await get_connection()
+    rows = await conn.fetch('''
+        SELECT * FROM recurring_bookings 
+        WHERE user_id = $1 AND is_active = TRUE
+        ORDER BY weekday, time
+    ''', user_id)
+    await conn.close()
+    return [dict(row) for row in rows]
 
 # ============================================================
 # === ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===============================
