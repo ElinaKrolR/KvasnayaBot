@@ -2011,10 +2011,6 @@ async def main():
     await init_db()
     await cleanup_old_data()
     
-    # Удаляем webhook (если был активирован)
-    await bot.delete_webhook(drop_pending_updates=True)
-    print("✅ Webhook удалён, переключаемся на Polling режим")
-    
     print("=" * 50)
     print("🤖 БОТ ЗАПУЩЕН!")
     print(f"📅 Дата и время: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
