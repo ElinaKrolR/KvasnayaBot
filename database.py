@@ -905,3 +905,38 @@ async def update_recurring_booking(booking_id: int, new_weekday: int, new_time: 
             UPDATE recurring_bookings 
             SET weekday = $1, time = $2 
             WHERE id = $3
+
+# ============================================================
+# === ФУНКЦИИ ДЛЯ ОЧИСТКИ ДАННЫХ ========================
+# ============================================================
+async def cleanup_old_data():
+    """Очищает старые тренировки (старше 7 дней)"""
+    try:
+        conn = await get_connection()
+        
+        # Удаляем тренировки старше 7 дней
+        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+        result = await conn.execute('''
+            DELETE FROM trainings 
+            WHERE datetime < $1 AND status IN ('completed', 'cancelled', 'cancelled_by_trainer')
+        ''', week_ago)
+        
+        # Удаляем временные отмены старше 7 дней после даты
+        week_ago_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+        await conn.execute('''
+            DELETE FROM recurring_cancellations 
+            WHERE cancel_date < $1
+        ''', week_ago_date)
+        
+        await conn.close()
+        print(f"🧹 Очистка БД: удалено старых записей")
+    except Exception as e:
+        print(f"Ошибка очистки БД: {e}")
+
+# Вызывать очистку при запуске бота
+async def main():
+    await init_db()
+    await cleanup_old_data()  # ← ДОБАВИТЬ
+    print("🤖 Бот запущен!")
+    print(f"👨‍💼 Тренер ID: {TRAINER_ID}")
+    await dp.start_polling(bot)            
