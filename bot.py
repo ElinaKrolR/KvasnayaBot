@@ -1,11 +1,8 @@
 import asyncio
-import os
 import re
 import sqlite3
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web 
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -17,7 +14,6 @@ from keyboards import *
 
 # Инициализация
 bot = Bot(token=BOT_TOKEN)
-WEBHOOK_PATH = f"/{BOT_TOKEN}"  # ← ДОБАВЬ ЭТУ СТРОКУ
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -55,6 +51,14 @@ def get_next_week_start():
     week_end = (next_monday + timedelta(days=6)).strftime("%Y-%m-%d")
     return next_monday, week_start, week_end
 
+def get_current_week_start():
+    """Возвращает (current_monday, week_start_str, week_end_str) для текущей недели"""
+    today = datetime.now()
+    current_monday = today - timedelta(days=today.weekday())
+    week_start = current_monday.strftime("%Y-%m-%d")
+    week_end = (current_monday + timedelta(days=6)).strftime("%Y-%m-%d")
+    return current_monday, week_start, week_end
+
 def get_week_days_with_status(week_start: str, week_type: str = "next"):
     """Получить дни недели с информацией о том, прошли они или нет"""
     today = datetime.now()
@@ -77,29 +81,14 @@ def get_week_days_with_status(week_start: str, week_type: str = "next"):
     
     return days
 
-def format_schedule_text(trainings_by_day: dict, week_label: str, recurring_bookings: list = None) -> str:
-    """Форматирует расписание для тренера (со всеми именами и постоянными записями)"""
+def format_schedule_text(trainings_by_day: dict, week_label: str) -> str:
+    """Форматирует расписание для тренера (со всеми именами)"""
     days_order = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
     
     text = f"🏋️‍♀️ *Расписание на {week_label}*\n\n"
     
-    # Если есть постоянные записи, добавляем их в расписание
-    recurring_by_day = {}
-    if recurring_bookings:
-        for rb in recurring_bookings:
-            day_name = days_order[rb['weekday']]
-            if day_name not in recurring_by_day:
-                recurring_by_day[day_name] = {}
-            recurring_by_day[day_name][rb['time']] = f"{rb['full_name']} (постоянная)"
-    
     for day_name in days_order:
-        day_data = trainings_by_day.get(day_name, {}).copy()
-        
-        # Добавляем постоянные записи
-        if day_name in recurring_by_day:
-            for time_key, name in recurring_by_day[day_name].items():
-                if time_key not in day_data:
-                    day_data[time_key] = name
+        day_data = trainings_by_day.get(day_name, {})
         
         locked_count = sum(1 for name in day_data.values() if name)
         
@@ -143,7 +132,6 @@ def format_schedule_for_client(week_start: datetime, week_label: str, client_use
         current_date = week_start + timedelta(days=i)
         date_str = current_date.strftime("%Y-%m-%d")
         
-        # Получаем разовые тренировки на этот день
         cursor.execute('''
             SELECT datetime, user_id 
             FROM trainings 
@@ -156,74 +144,43 @@ def format_schedule_for_client(week_start: datetime, week_label: str, client_use
             time_key = dt.strftime("%H:%M")
             regular_trainings[time_key] = row[1]
         
-        # Получаем постоянные записи на этот день (из переданного словаря)
-        # и также проверяем временные отмены
-        cursor.execute('''
-            SELECT cancel_date FROM recurring_cancellations rc
-            JOIN recurring_bookings rb ON rc.recurring_id = rb.id
-            WHERE rb.weekday = ? AND rc.cancel_date = ?
-        ''', (i, date_str))
-        cancelled_dates = [row[0] for row in cursor.fetchall()]
-        
-        # Подсчитываем количество занятых слотов
         locked_count = 0
         for hour in range(9, 22):
             time_key = f"{hour:02d}:00"
             if hour == 21:
                 time_key = "21:00"
             
-            # Проверяем постоянную запись
             recurring_key = f"{i}_{time_key}"
             recurring_user_id = recurring_bookings.get(recurring_key)
             
-            # Проверяем, не отменена ли эта постоянная запись на эту дату
-            is_cancelled = date_str in cancelled_dates
-            
-            if recurring_user_id and not is_cancelled:
-                locked_count += 1
-            elif time_key in regular_trainings:
+            if recurring_user_id or time_key in regular_trainings:
                 locked_count += 1
         
-        # Название дня с количеством занятых слотов
         if locked_count > 0:
             text += f"📌 *{day_name}* (🔒 {locked_count} занятий)\n"
         else:
             text += f"📌 *{day_name}*\n"
         
-        # Добавляем расписание по часам
         for hour in range(9, 22):
             time_key = f"{hour:02d}:00"
             if hour == 21:
                 time_key = "21:00"
             
-            # Проверяем постоянную запись
             recurring_key = f"{i}_{time_key}"
             recurring_user_id = recurring_bookings.get(recurring_key)
             
-            # Проверяем, не отменена ли эта постоянная запись на эту дату
-            is_cancelled = date_str in cancelled_dates
-            
-            # Проверяем разовую запись
-            regular_user_id = regular_trainings.get(time_key)
-            
-            if recurring_user_id and not is_cancelled:
-                # Постоянная запись
+            if recurring_user_id:
                 if recurring_user_id == client_user_id:
-                    text += f"{time_key} *ВЫ* 🔒 (постоянная)\n"
+                    text += f"{time_key} *ВЫ* 🔒\n"
                 else:
-                    text += f"{time_key} 🔒 (постоянная)\n"
-            elif regular_user_id:
-                # Разовая запись
-                if regular_user_id == client_user_id:
+                    text += f"{time_key} 🔒\n"
+            elif time_key in regular_trainings:
+                if regular_trainings[time_key] == client_user_id:
                     text += f"{time_key} *ВЫ*\n"
                 else:
                     text += f"{time_key} 🔒\n"
             else:
-                # Свободно
-                if can_book:
-                    text += f"{time_key}\n"
-                else:
-                    text += f"{time_key}\n"
+                text += f"{time_key}\n"
         
         text += "\n"
     
@@ -234,10 +191,12 @@ def format_schedule_for_client(week_start: datetime, week_label: str, client_use
     
     return text
 
+# === ОСНОВНЫЕ КОМАНДЫ ===
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_id = message.from_user.id
-    add_user(user_id, message.from_user.username, message.from_user.full_name)
+    await add_user(user_id, message.from_user.username, message.from_user.full_name)
     
     is_trainer = (user_id == TRAINER_ID)
     await message.answer(
@@ -254,7 +213,7 @@ async def cmd_start(message: types.Message):
 @dp.message(lambda message: message.text == "📅 Мои тренировки")
 async def my_schedule(message: types.Message):
     user_id = message.from_user.id
-    trainings = get_user_trainings(user_id, 'confirmed')
+    trainings = await get_user_trainings(user_id, 'confirmed')
     
     if not trainings:
         await message.answer("📭 У вас нет предстоящих тренировок.\nЗаписаться: /book")
@@ -271,7 +230,7 @@ async def my_schedule(message: types.Message):
 @dp.message(lambda message: message.text == "✍️ Записаться")
 async def book_training(message: types.Message):
     user_id = message.from_user.id
-    user = get_user(user_id)
+    user = await get_user(user_id)
     
     if not user:
         await message.answer("❌ Пожалуйста, начните с команды /start")
@@ -286,7 +245,7 @@ async def book_training(message: types.Message):
 @dp.message(Command("my_package"))
 @dp.message(lambda message: message.text == "📦 Мой пакет")
 async def my_package(message: types.Message):
-    user = get_user(message.from_user.id)
+    user = await get_user(message.from_user.id)
     if user:
         package_left = user['package_left']
         package_total = user['package_total']
@@ -328,6 +287,8 @@ async def my_history(message: types.Message):
     
     await message.answer(text, parse_mode="Markdown")
 
+# === ЗАПИСЬ НА ТРЕНИРОВКУ ===
+
 @dp.callback_query(lambda c: c.data.startswith("book_week_"))
 async def select_week_for_booking(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
@@ -345,22 +306,17 @@ async def select_week_for_booking(callback: types.CallbackQuery, state: FSMConte
         week_label = "следующую"
     
     week_start_str = week_start.strftime("%Y-%m-%d")
-    free_slots = get_free_slots(week_start_str)
-    
-    # ОТЛАДКА
-    print(f"DEBUG: week_type={week_type}, week_start={week_start_str}, free_slots={len(free_slots)}")
+    free_slots = await get_free_slots(week_start_str)
     
     if not free_slots:
         await callback.message.edit_text(
             f"❌ *Запись на {week_label} неделю ещё не открыта!*\n\n"
-            f"Тренер должен открыть запись через панель тренера.\n\n"
-            f"Используйте команду /debug_slots для проверки.",
+            f"Тренер должен открыть запись через панель тренера.",
             parse_mode="Markdown"
         )
         await callback.answer()
         return
     
-    # Группируем слоты по дням
     days_with_slots = {}
     for slot in free_slots:
         date_str = slot.split()[0]
@@ -368,15 +324,11 @@ async def select_week_for_booking(callback: types.CallbackQuery, state: FSMConte
             days_with_slots[date_str] = []
         days_with_slots[date_str].append(slot)
     
-    # ОТЛАДКА - выводим все дни со слотами
-    print(f"DEBUG: Дни со слотами: {list(days_with_slots.keys())}")
-    
     days_list = get_week_days_with_status(week_start_str, week_type)
     for day in days_list:
         date_str = day['date']
         slots = days_with_slots.get(date_str, [])
         day['display'] = f"{day['display']} ({len(slots)} окон)"
-        print(f"DEBUG: {day['display']}")
     
     await state.update_data(week_slots=days_with_slots, week_type=week_type, week_start=week_start_str)
     
@@ -387,7 +339,7 @@ async def select_week_for_booking(callback: types.CallbackQuery, state: FSMConte
         reply_markup=day_selection_keyboard(days_list, week_type)
     )
     await callback.answer()
-    
+
 @dp.callback_query(lambda c: c.data.startswith("select_day_"))
 async def select_time_for_booking(callback: types.CallbackQuery, state: FSMContext):
     parts = callback.data.split("_")
@@ -446,7 +398,7 @@ async def process_booking_time(callback: types.CallbackQuery):
         await callback.answer()
         return
     
-    existing = get_user_trainings(user_id, 'confirmed')
+    existing = await get_user_trainings(user_id, 'confirmed')
     for t in existing:
         if t['datetime'] == datetime_str:
             await callback.message.edit_text("❌ Вы уже записаны на это время!")
@@ -474,8 +426,8 @@ async def process_booking_time(callback: types.CallbackQuery):
     
     conn.close()
     
-    create_booking_request(user_id, datetime_str)
-    user = get_user(user_id)
+    await create_booking_request(user_id, datetime_str)
+    user = await get_user(user_id)
     package_info = f"пакет: {user['package_left']} занятий" if user['package_total'] > 0 else "разовые занятия"
     
     await bot.send_message(
@@ -518,6 +470,8 @@ async def cancel_booking(callback: types.CallbackQuery):
     await callback.message.edit_text("❌ Запись отменена.")
     await callback.answer()
 
+# === РАСПИСАНИЕ ===
+
 @dp.message(Command("schedule"))
 @dp.message(lambda message: message.text == "📅 Расписание")
 async def show_client_schedule(message: types.Message):
@@ -554,30 +508,19 @@ async def show_client_week_schedule(callback: types.CallbackQuery):
         week_start = today + timedelta(days=(7 - today.weekday()))
         week_label = "следующую неделю"
         week_start_str = week_start.strftime("%Y-%m-%d")
-        week_status = get_week_status(week_start_str)
+        week_status = await get_week_status(week_start_str)
         can_book = week_status["has_slots"]
     
     week_end = week_start + timedelta(days=6)
-    week_start_str = week_start.strftime("%Y-%m-%d")
-    week_end_str = week_end.strftime("%Y-%m-%d")
-    
-    # Получаем постоянные записи на эту неделю
-    recurring_bookings = get_recurring_bookings_for_week(week_start_str, week_end_str)
-    
-    # Добавляем отладочный вывод для тренера
-    if callback.from_user.id == TRAINER_ID:
-        print(f"DEBUG: Постоянные записи на неделю {week_start_str}: {len(recurring_bookings)}")
-        for rb in recurring_bookings:
-            print(f"  - {rb['full_name']}: день {rb['weekday']} время {rb['time']}")
+    recurring_bookings = await get_recurring_bookings_for_week(week_start.strftime("%Y-%m-%d"), week_end.strftime("%Y-%m-%d"))
     
     recurring_dict = {}
     for rb in recurring_bookings:
         for i in range(7):
             current_date = week_start + timedelta(days=i)
             if current_date.weekday() == rb['weekday']:
-                # Проверяем даты действия
                 if rb['end_date'] is None or rb['end_date'] >= current_date.strftime("%Y-%m-%d"):
-                    if rb['start_date'] <= current_date.strftime("%Y-%d-%m"):
+                    if rb['start_date'] <= current_date.strftime("%Y-%m-%d"):
                         recurring_dict[f"{i}_{rb['time']}"] = rb['user_id']
     
     text = format_schedule_for_client(week_start, week_label, user_id, recurring_dict, can_book)
@@ -588,6 +531,8 @@ async def show_client_week_schedule(callback: types.CallbackQuery):
     
     await callback.message.edit_text(text, parse_mode="Markdown")
     await callback.answer()
+
+# === ПАНЕЛЬ ТРЕНЕРА ===
 
 @dp.message(Command("admin_panel"))
 @dp.message(lambda message: message.text == "👨‍💼 Панель тренера")
@@ -629,13 +574,6 @@ async def show_week_schedule(callback: types.CallbackQuery):
         week_start = today + timedelta(days=(7 - today.weekday()))
         week_label = "следующую неделю"
     
-    week_end = week_start + timedelta(days=6)
-    week_start_str = week_start.strftime("%Y-%m-%d")
-    week_end_str = week_end.strftime("%Y-%m-%d")
-    
-    # Получаем постоянные записи
-    recurring_bookings = get_recurring_bookings_for_week(week_start_str, week_end_str)
-    
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     trainings_by_day = {}
@@ -663,7 +601,7 @@ async def show_week_schedule(callback: types.CallbackQuery):
         trainings_by_day[day_name] = day_trainings
     
     conn.close()
-    text = format_schedule_text(trainings_by_day, week_label, recurring_bookings)
+    text = format_schedule_text(trainings_by_day, week_label)
     await callback.message.edit_text(text, parse_mode="Markdown")
     await callback.answer()
 
@@ -673,7 +611,7 @@ async def show_requests(callback: types.CallbackQuery):
         await callback.answer("Нет доступа")
         return
     
-    requests = get_pending_requests()
+    requests = await get_pending_requests()
     if not requests:
         await callback.message.edit_text("📭 Нет новых заявок.")
         return
@@ -693,8 +631,8 @@ async def approve_booking(callback: types.CallbackQuery):
     
     request_id = int(callback.data.split("_")[1])
     
-    training_type, user_id, datetime_str = approve_request(request_id)
-    user = get_user(user_id)
+    training_type, user_id, datetime_str = await approve_request(request_id)
+    user = await get_user(user_id)
     package_left = user['package_left'] if user else 0
     package_total = user['package_total'] if user else 0
     
@@ -736,7 +674,7 @@ async def reject_booking(callback: types.CallbackQuery):
         return
     
     user_id, datetime_str, full_name, username = req
-    reject_request(request_id)
+    await reject_request(request_id)
     
     try:
         await bot.send_message(
@@ -758,13 +696,14 @@ async def reject_booking(callback: types.CallbackQuery):
     )
     await callback.answer()
 
+# === ОТКРЫТИЕ ЗАПИСИ ===
+
 @dp.callback_query(lambda c: c.data == "admin_slots")
 async def open_slots_menu(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != TRAINER_ID:
         await callback.answer("Нет доступа")
         return
     
-    # Предлагаем выбрать неделю для открытия
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 Текущая неделя", callback_data="open_slots_week_current")],
         [InlineKeyboardButton(text="📅 Следующая неделя", callback_data="open_slots_week_next")],
@@ -786,7 +725,7 @@ async def open_slots_week_selection(callback: types.CallbackQuery, state: FSMCon
         await callback.answer("Нет доступа")
         return
     
-    week_type = callback.data.split("_")[3]  # current или next
+    week_type = callback.data.split("_")[3]
     today = datetime.now()
     
     if week_type == "current":
@@ -796,8 +735,7 @@ async def open_slots_week_selection(callback: types.CallbackQuery, state: FSMCon
         week_start_date, week_start, week_end = get_next_week_start()
         week_label = "следующую"
     
-    # Проверяем, открыта ли уже запись
-    week_status = get_week_status(week_start)
+    week_status = await get_week_status(week_start)
     
     if week_status["has_slots"]:
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -818,7 +756,6 @@ async def open_slots_week_selection(callback: types.CallbackQuery, state: FSMCon
         await callback.answer()
         return
     
-    # Новая запись
     await state.update_data(
         busy_slots=[],
         week_start=week_start,
@@ -856,7 +793,6 @@ async def select_day_for_slots(callback: types.CallbackQuery, state: FSMContext)
     day_name = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'][day_index]
     date_str = current_date.strftime("%d.%m")
     
-    # Проверяем, не прошла ли дата (только для текущей недели)
     is_passed = False
     if week_type == 'current':
         is_passed = current_date.date() < datetime.now().date()
@@ -966,7 +902,6 @@ async def finish_opening_slots(callback: types.CallbackQuery, state: FSMContext)
         day_name = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'][day]
         day_slots = 0
         
-        # Для текущей недели пропускаем прошедшие дни
         if week_type == 'current' and current_date.date() < today:
             days_info.append(f"{day_name}: (день прошёл, слоты не созданы)")
             continue
@@ -1003,7 +938,7 @@ async def confirm_open_slots(callback: types.CallbackQuery, state: FSMContext):
     week_start_date = data.get('week_start_date')
     week_type = data.get('week_type', 'next')
     
-    clear_weekly_slots(week_start)
+    await clear_weekly_slots(week_start)
     
     created = 0
     days_created = []
@@ -1015,7 +950,6 @@ async def confirm_open_slots(callback: types.CallbackQuery, state: FSMContext):
         day_name = day_names[day]
         day_slots = 0
         
-        # Для текущей недели пропускаем прошедшие дни
         if week_type == 'current' and current_date.date() < today:
             days_created.append(f"{day_name}: (день прошёл, слоты не созданы)")
             continue
@@ -1023,13 +957,13 @@ async def confirm_open_slots(callback: types.CallbackQuery, state: FSMContext):
         for hour in range(WORK_HOURS_START, WORK_HOURS_END):
             datetime_str = current_date.strftime(f"%Y-%m-%d {hour:02d}:00")
             if datetime_str not in busy_slots:
-                add_open_slot(datetime_str, week_start)
+                await add_open_slot(datetime_str, week_start)
                 created += 1
                 day_slots += 1
         
         days_created.append(f"{day_name}: {day_slots} слотов")
     
-    sync_slots_with_trainings(week_start)
+    await sync_slots_with_trainings(week_start)
     
     await callback.message.edit_text(
         f"✅ *Запись успешно открыта!*\n\n"
@@ -1041,21 +975,67 @@ async def confirm_open_slots(callback: types.CallbackQuery, state: FSMContext):
     )
     await state.clear()
     await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("confirm_overwrite_"))
+async def confirm_overwrite(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != TRAINER_ID:
+        await callback.answer("Нет доступа")
+        return
     
+    week_type = callback.data.split("_")[2]
+    today = datetime.now()
+    
+    if week_type == "current":
+        week_start_date, week_start, week_end = get_current_week_start()
+    else:
+        week_start_date, week_start, week_end = get_next_week_start()
+    
+    await close_week_slots(week_start)
+    
+    await callback.message.answer("🗑️ Старые слоты удалены. Теперь откройте запись заново.")
+    
+    await state.update_data(
+        busy_slots=[],
+        week_start=week_start,
+        week_end=week_end,
+        week_start_date=week_start_date,
+        week_type=week_type
+    )
+    
+    await callback.message.edit_text(
+        f"📅 *Открытие записи на {week_type.upper()} неделю*\n\n"
+        f"🗓️ Неделя: {week_start} - {week_end}\n\n"
+        f"👇 *Выберите день недели:*",
+        parse_mode="Markdown",
+        reply_markup=open_slots_weekday_keyboard()
+    )
+    await state.set_state(TrainerStates.selecting_slots_day)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "cancel_overwrite")
+async def cancel_overwrite(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != TRAINER_ID:
+        await callback.answer("Нет доступа")
+        return
+    
+    await callback.message.edit_text("✅ Оставил существующее расписание без изменений.")
+    await state.clear()
+    await callback.answer()
+
 @dp.callback_query(lambda c: c.data.startswith("admin_close_slots_"))
 async def close_slots_menu(callback: types.CallbackQuery):
     if callback.from_user.id != TRAINER_ID:
         await callback.answer("Нет доступа")
         return
     
-    week_type = callback.data.split("_")[3]  # current или next
+    week_type = callback.data.split("_")[3]
     
     if week_type == "current":
         _, week_start, week_end = get_current_week_start()
     else:
         _, week_start, week_end = get_next_week_start()
     
-    week_status = get_week_status(week_start)
+    week_status = await get_week_status(week_start)
     
     if not week_status["has_slots"]:
         await callback.message.edit_text(
@@ -1088,14 +1068,14 @@ async def confirm_close_slots(callback: types.CallbackQuery):
         await callback.answer("Нет доступа")
         return
     
-    week_type = callback.data.split("_")[3]  # current или next
+    week_type = callback.data.split("_")[3]
     
     if week_type == "current":
         _, week_start, week_end = get_current_week_start()
     else:
         _, week_start, week_end = get_next_week_start()
     
-    deleted = close_week_slots(week_start)
+    deleted = await close_week_slots(week_start)
     
     await callback.message.edit_text(
         f"✅ ЗАПИСЬ ЗАКРЫТА!\n\n"
@@ -1105,6 +1085,7 @@ async def confirm_close_slots(callback: types.CallbackQuery):
         f"Существующие записи клиентов сохранены."
     )
     await callback.answer()
+
 @dp.callback_query(lambda c: c.data == "cancel_close_slots")
 async def cancel_close_slots(callback: types.CallbackQuery):
     if callback.from_user.id != TRAINER_ID:
@@ -1114,53 +1095,7 @@ async def cancel_close_slots(callback: types.CallbackQuery):
     await callback.message.edit_text(f"✅ Запись осталась открытой.")
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data.startswith("confirm_overwrite_"))
-async def confirm_overwrite(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != TRAINER_ID:
-        await callback.answer("Нет доступа")
-        return
-    
-    week_type = callback.data.split("_")[2]  # current или next
-    today = datetime.now()
-    
-    if week_type == "current":
-        week_start_date, week_start, week_end = get_current_week_start()
-    else:
-        week_start_date, week_start, week_end = get_next_week_start()
-    
-    # Очищаем старые слоты
-    close_week_slots(week_start)
-    
-    await callback.message.answer("🗑️ Старые слоты удалены. Теперь откройте запись заново.")
-    
-    # Начинаем процесс открытия заново
-    await state.update_data(
-        busy_slots=[],
-        week_start=week_start,
-        week_end=week_end,
-        week_start_date=week_start_date,
-        week_type=week_type
-    )
-    
-    await callback.message.edit_text(
-        f"📅 *Открытие записи на {week_type.upper()} неделю*\n\n"
-        f"🗓️ Неделя: {week_start} - {week_end}\n\n"
-        f"👇 *Выберите день недели:*",
-        parse_mode="Markdown",
-        reply_markup=open_slots_weekday_keyboard()
-    )
-    await state.set_state(TrainerStates.selecting_slots_day)
-    await callback.answer()
-@dp.callback_query(lambda c: c.data == "cancel_overwrite")
-async def cancel_overwrite(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != TRAINER_ID:
-        await callback.answer("Нет доступа")
-        return
-    
-    await callback.message.edit_text("✅ Оставил существующее расписание без изменений.")
-    await state.clear()
-    await callback.answer()
-
+# === ОТМЕНА ТРЕНИРОВОК ===
 
 @dp.callback_query(lambda c: c.data == "admin_cancel")
 async def cancel_training_menu(callback: types.CallbackQuery):
@@ -1169,7 +1104,7 @@ async def cancel_training_menu(callback: types.CallbackQuery):
         return
     
     today = datetime.now().strftime("%Y-%m-%d")
-    trainings = get_all_trainings_by_date(today)
+    trainings = await get_all_trainings_by_date(today)
     
     if not trainings:
         await callback.message.edit_text("📭 Сегодня нет тренировок.")
@@ -1197,7 +1132,7 @@ async def cancel_single_training(message: types.Message):
     training_id = int(parts[1])
     reason = parts[2] if len(parts) > 2 else "Не указана"
     
-    result, refund_type, user_id, datetime_str = cancel_training_by_trainer(training_id, reason)
+    result, refund_type, user_id, datetime_str = await cancel_training_by_trainer(training_id, reason)
     
     if result:
         try:
@@ -1293,7 +1228,7 @@ async def process_mass_reason(message: types.Message, state: FSMContext):
     affected = cursor.fetchall()
     conn.close()
     
-    count = cancel_trainings_bulk(date_str, time_start, time_end, reason)
+    count = await cancel_trainings_bulk(date_str, time_start, time_end, reason)
     
     if count > 0:
         await message.answer(f"✅ Отменено {count} тренировок.")
@@ -1307,13 +1242,15 @@ async def process_mass_reason(message: types.Message, state: FSMContext):
     
     await state.clear()
 
+# === УПРАВЛЕНИЕ ПАКЕТАМИ ===
+
 @dp.callback_query(lambda c: c.data == "admin_add_package")
 async def add_package_menu(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != TRAINER_ID:
         await callback.answer("Нет доступа")
         return
     
-    users = get_all_users()
+    users = await get_all_users()
     if users:
         user_list = "📋 *Клиенты:*\n"
         for u in users:
@@ -1342,14 +1279,14 @@ async def process_add_package(message: types.Message, state: FSMContext):
         
         username = parts[0].lstrip('@')
         amount = int(parts[1])
-        user = get_user_by_username(username)
+        user = await get_user_by_username(username)
         
         if not user:
             await message.answer(f"❌ Пользователь @{username} не найден")
             return
         
         old_package = user['package_left']
-        update_package(user['user_id'], amount)
+        await update_package(user['user_id'], amount)
         
         await message.answer(f"✅ {user['full_name']}: +{amount} занятий (было {old_package}, стало {old_package + amount})")
         try:
@@ -1360,6 +1297,8 @@ async def process_add_package(message: types.Message, state: FSMContext):
         await message.answer(f"❌ Ошибка: {e}")
     
     await state.clear()
+
+# === ОТЧЁТЫ ===
 
 @dp.callback_query(lambda c: c.data == "admin_report")
 async def weekly_report(callback: types.CallbackQuery):
@@ -1402,7 +1341,7 @@ async def today_schedule(callback: types.CallbackQuery):
         return
     
     today = datetime.now().strftime("%Y-%m-%d")
-    trainings = get_all_trainings_by_date(today)
+    trainings = await get_all_trainings_by_date(today)
     
     if not trainings:
         await callback.message.edit_text(f"📭 На сегодня ({today}) нет тренировок.")
@@ -1415,6 +1354,8 @@ async def today_schedule(callback: types.CallbackQuery):
     
     await callback.message.edit_text(text, parse_mode="Markdown")
     await callback.answer()
+
+# === РАССЫЛКА ===
 
 @dp.callback_query(lambda c: c.data == "admin_broadcast")
 async def broadcast_menu(callback: types.CallbackQuery, state: FSMContext):
@@ -1431,7 +1372,7 @@ async def process_broadcast(message: types.Message, state: FSMContext):
     if message.from_user.id != TRAINER_ID:
         return
     
-    users = get_all_users()
+    users = await get_all_users()
     sent = 0
     failed = 0
     
@@ -1457,6 +1398,8 @@ async def back_to_admin(callback: types.CallbackQuery):
     await callback.message.edit_text("👨‍💼 *Панель тренера*", parse_mode="Markdown", reply_markup=admin_panel_keyboard())
     await callback.answer()
 
+# === ПОСТОЯННЫЕ ЗАПИСИ ===
+
 @dp.callback_query(lambda c: c.data == "admin_recurring")
 async def recurring_menu(callback: types.CallbackQuery):
     if callback.from_user.id != TRAINER_ID:
@@ -1479,7 +1422,7 @@ async def recurring_add_user_select(callback: types.CallbackQuery):
         await callback.answer("Нет доступа")
         return
     
-    users = get_all_users()
+    users = await get_all_users()
     if not users:
         await callback.message.edit_text("📭 Нет зарегистрированных клиентов.")
         return
@@ -1516,192 +1459,34 @@ async def recurring_add_time_select(callback: types.CallbackQuery, state: FSMCon
     weekday = int(callback.data.split("_")[2])
     await state.update_data(recurring_weekday=weekday)
     
-    # Получаем список времени, исключая уже занятые слоты на ближайшую неделю
-    data = await state.get_data()
-    user_id = data.get('recurring_user_id')
-    
-    # Получаем ближайшую следующую неделю
-    next_monday, week_start, week_end = get_next_week_start()
-    
-    # Вычисляем конкретную дату для выбранного дня недели
-    days_until_target = (weekday - next_monday.weekday()) % 7
-    target_date = next_monday + timedelta(days=days_until_target)
-    date_str = target_date.strftime("%Y-%m-%d")
-    
-    # Получаем все занятые слоты на эту дату
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    # Разовые тренировки
-    cursor.execute('SELECT datetime FROM trainings WHERE DATE(datetime) = ? AND status = "confirmed"', (date_str,))
-    booked_slots = [row[0].split()[1] for row in cursor.fetchall()]
-    
-    # Постоянные записи других клиентов
-    cursor.execute('''
-        SELECT time FROM recurring_bookings 
-        WHERE weekday = ? AND is_active = 1 AND user_id != ?
-        AND (end_date IS NULL OR end_date >= ?)
-        AND start_date <= ?
-    ''', (weekday, user_id, date_str, date_str))
-    recurring_slots = [row[0] for row in cursor.fetchall()]
-    
-    conn.close()
-    
-    # Объединяем занятые слоты
-    all_busy_slots = set(booked_slots + recurring_slots)
-    
-    # Создаем список времени с метками занятости
-    hours = []
-    for h in range(WORK_HOURS_START, WORK_HOURS_END):
-        time_key = f"{h:02d}:00"
-        if h == 21:
-            time_key = "21:00"
-        
-        if time_key in all_busy_slots:
-            hours.append(f"🔒 {time_key} (занято)")
-        else:
-            hours.append(time_key)
-    
-    # Сохраняем занятые слоты в state для проверки при сохранении
-    await state.update_data(busy_slots_for_weekday=all_busy_slots)
-    
     await callback.message.edit_text(
-        f"⏰ *Выберите время* для постоянной записи:\n\n"
-        f"📅 День: {['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'][weekday]}\n"
-        f"🔒 - время уже занято (разовой или постоянной записью)\n\n"
-        f"Выберите свободное время:",
+        "⏰ *Выберите время*:",
         parse_mode="Markdown",
-        reply_markup=recurring_time_keyboard_with_status(hours, weekday)
+        reply_markup=recurring_time_keyboard()
     )
     await callback.answer()
 
-def get_current_week_start():
-    """Возвращает (current_monday, week_start_str, week_end_str) для текущей недели"""
-    today = datetime.now()
-    current_monday = today - timedelta(days=today.weekday())
-    week_start = current_monday.strftime("%Y-%m-%d")
-    week_end = (current_monday + timedelta(days=6)).strftime("%Y-%m-%d")
-    return current_monday, week_start, week_end
-
-def recurring_time_keyboard_with_status(hours: list, weekday: int):
-    """Клавиатура для выбора времени с отображением занятости"""
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
-    row = []
-    for hour in hours:
-        if hour.startswith("🔒"):
-            # Занятое время - кнопка неактивна
-            display_text = hour
-            callback_data = f"time_busy_{weekday}_{hour.split()[1]}"
-        else:
-            display_text = hour
-            callback_data = f"recurring_time_select_{weekday}_{hour}"
-        
-        row.append(InlineKeyboardButton(text=display_text, callback_data=callback_data))
-        if len(row) == 3:
-            keyboard.inline_keyboard.append(row)
-            row = []
-    if row:
-        keyboard.inline_keyboard.append(row)
-    
-    keyboard.inline_keyboard.append([
-        InlineKeyboardButton(text="🔙 Назад к дням", callback_data="recurring_back_day")
-    ])
-    return keyboard
-
-@dp.callback_query(lambda c: c.data.startswith("recurring_time_select_"))
-async def recurring_check_conflict(callback: types.CallbackQuery, state: FSMContext):
+@dp.callback_query(lambda c: c.data.startswith("recurring_time_"))
+async def recurring_add_duration(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != TRAINER_ID:
         await callback.answer("Нет доступа")
         return
     
-    parts = callback.data.split("_")
-    weekday = int(parts[3])
-    time_str = parts[4]
+    time_str = callback.data.split("_")[2]
+    await state.update_data(recurring_time=time_str)
     
     data = await state.get_data()
     user_id = data.get('recurring_user_id')
-    busy_slots = data.get('busy_slots_for_weekday', set())
     
-    # Проверяем, не занято ли время
-    if time_str in busy_slots:
-        # Получаем информацию о том, кто занимает это время
-        next_monday, week_start, week_end = get_next_week_start()
-        days_until_target = (weekday - next_monday.weekday()) % 7
-        target_date = next_monday + timedelta(days=days_until_target)
-        date_str = target_date.strftime("%Y-%m-%d")
-        datetime_str = f"{date_str} {time_str}"
-        
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        
-        # Проверяем разовую тренировку
-        cursor.execute('''
-            SELECT u.full_name FROM trainings t
-            JOIN users u ON t.user_id = u.user_id
-            WHERE t.datetime = ? AND t.status = 'confirmed'
-        ''', (datetime_str,))
-        training = cursor.fetchone()
-        
-        conflict_name = None
-        if training:
-            conflict_name = training[0]
-        else:
-            # Проверяем постоянную запись другого клиента
-            cursor.execute('''
-                SELECT u.full_name FROM recurring_bookings rb
-                JOIN users u ON rb.user_id = u.user_id
-                WHERE rb.weekday = ? AND rb.time = ? AND rb.is_active = 1 AND rb.user_id != ?
-                AND (rb.end_date IS NULL OR rb.end_date >= ?)
-                AND rb.start_date <= ?
-            ''', (weekday, time_str, user_id, date_str, date_str))
-            recurring = cursor.fetchone()
-            if recurring:
-                conflict_name = recurring[0]
-        
-        conn.close()
-        
-        if conflict_name:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Да, всё равно добавить", callback_data=f"recurring_force_add_{weekday}_{time_str}")],
-                [InlineKeyboardButton(text="❌ Нет, выбрать другое время", callback_data="recurring_back_time")]
-            ])
-            
-            await callback.message.edit_text(
-                f"⚠️ *ВНИМАНИЕ: КОНФЛИКТ ЗАПИСЕЙ!*\n\n"
-                f"Время {time_str} уже ЗАНЯТО!\n\n"
-                f"👤 Кто занимает: *{conflict_name}*\n"
-                f"📅 Ближайшая дата: {target_date.strftime('%d.%m.%Y')}\n\n"
-                f"Вы уверены, что хотите добавить постоянную запись на это время?\n"
-                f"Это создаст конфликт в расписании!",
-                parse_mode="Markdown",
-                reply_markup=keyboard
-            )
-            await callback.answer()
-            return
-    
-    # Если время свободно или пользователь подтвердил добавление
-    await state.update_data(recurring_time=time_str, recurring_weekday=weekday)
-    await show_duration_choice(callback, state)
-
-@dp.callback_query(lambda c: c.data.startswith("recurring_force_add_"))
-async def recurring_force_add(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != TRAINER_ID:
-        await callback.answer("Нет доступа")
+    if not user_id:
+        await callback.message.edit_text("❌ Ошибка: пользователь не найден! Пожалуйста, начните добавление заново.", parse_mode="Markdown")
+        await callback.answer()
         return
     
-    parts = callback.data.split("_")
-    weekday = int(parts[3])
-    time_str = parts[4]
-    
-    await state.update_data(recurring_time=time_str, recurring_weekday=weekday)
-    await show_duration_choice(callback, state)
-
-async def show_duration_choice(callback: types.CallbackQuery, state: FSMContext):
-    """Показать выбор длительности постоянной записи"""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 Бессрочно", callback_data="recurring_duration_forever")],
         [InlineKeyboardButton(text="📅 Ввести свою дату", callback_data="recurring_duration_custom")],
-        [InlineKeyboardButton(text="🔙 Назад к выбору времени", callback_data="recurring_back_time")]
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="recurring_back_time")]
     ])
     
     await callback.message.edit_text(
@@ -1711,43 +1496,6 @@ async def show_duration_choice(callback: types.CallbackQuery, state: FSMContext)
         parse_mode="Markdown",
         reply_markup=keyboard
     )
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data == "recurring_back_time")
-async def recurring_back_time(callback: types.CallbackQuery, state: FSMContext):
-    """Возврат к выбору времени"""
-    data = await state.get_data()
-    weekday = data.get('recurring_weekday')
-    user_id = data.get('recurring_user_id')
-    
-    if user_id and weekday is not None:
-        # Повторно показываем выбор времени
-        await callback.message.edit_text(
-            "⏰ *Выберите время* для постоянной записи:",
-            parse_mode="Markdown"
-        )
-        # Вызываем функцию выбора времени заново
-        await recurring_add_time_select(callback, state)
-    else:
-        await callback.message.edit_text("❌ Ошибка: сессия потеряна. Начните добавление заново.", parse_mode="Markdown")
-        await recurring_add_user_select(callback)
-    await callback.answer()
-
-@dp.callback_query(lambda c: c.data == "recurring_back_day")
-async def recurring_back_day(callback: types.CallbackQuery, state: FSMContext):
-    """Возврат к выбору дня"""
-    data = await state.get_data()
-    user_id = data.get('recurring_user_id')
-    
-    if user_id:
-        await callback.message.edit_text(
-            "📅 *Выберите день недели*:",
-            parse_mode="Markdown",
-            reply_markup=recurring_weekday_keyboard()
-        )
-    else:
-        await callback.message.edit_text("❌ Ошибка: сессия потеряна. Начните добавление заново.", parse_mode="Markdown")
-        await recurring_add_user_select(callback)
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data.startswith("recurring_duration_"))
@@ -1773,22 +1521,8 @@ async def recurring_add_save(callback: types.CallbackQuery, state: FSMContext):
     if duration_type == "forever":
         end_date = None
         duration_text = "бессрочно"
-        
-        # Проверяем, нет ли уже такой постоянной записи
-        existing = get_recurring_bookings(user_id)
-        for ex in existing:
-            if ex['weekday'] == weekday and ex['time'] == time_str:
-                await callback.message.edit_text(
-                    f"❌ *Ошибка!*\n\n"
-                    f"У этого клиента уже есть постоянная запись на {['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье'][weekday]} в {time_str}.\n\n"
-                    f"Сначала отмените старую запись, затем добавьте новую.",
-                    parse_mode="Markdown"
-                )
-                await callback.answer()
-                return
-        
-        add_recurring_booking(user_id, weekday, time_str, start_date, end_date)
-        user = get_user(user_id)
+        await add_recurring_booking(user_id, weekday, time_str, start_date, end_date)
+        user = await get_user(user_id)
         if user:
             days = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
             
@@ -1828,6 +1562,7 @@ async def recurring_add_save(callback: types.CallbackQuery, state: FSMContext):
         )
         await state.set_state(TrainerStates.waiting_for_recurring_end_date)
         await callback.answer()
+
 @dp.message(TrainerStates.waiting_for_recurring_end_date)
 async def process_recurring_end_date(message: types.Message, state: FSMContext):
     if message.from_user.id != TRAINER_ID:
@@ -1849,8 +1584,8 @@ async def process_recurring_end_date(message: types.Message, state: FSMContext):
     time_str = data.get('recurring_time')
     start_date = datetime.now().strftime("%Y-%m-%d")
     
-    add_recurring_booking(user_id, weekday, time_str, start_date, end_date)
-    user = get_user(user_id)
+    await add_recurring_booking(user_id, weekday, time_str, start_date, end_date)
+    user = await get_user(user_id)
     if user:
         days = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
         
@@ -1885,7 +1620,7 @@ async def recurring_list(callback: types.CallbackQuery):
         await callback.answer("Нет доступа")
         return
     
-    bookings = get_recurring_bookings()
+    bookings = await get_recurring_bookings()
     if not bookings:
         await callback.message.edit_text("📭 Нет активных постоянных записей.")
         return
@@ -1978,7 +1713,7 @@ async def recurring_skip_next_week(callback: types.CallbackQuery, state: FSMCont
     days_until_target = (weekday - next_monday.weekday()) % 7
     target_date = next_monday + timedelta(days=days_until_target)
     
-    add_temporary_cancellation(booking_id, target_date.strftime("%Y-%m-%d"))
+    await add_temporary_cancellation(booking_id, target_date.strftime("%Y-%m-%d"))
     
     days = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
     
@@ -2054,7 +1789,7 @@ async def process_recurring_skip_date(message: types.Message, state: FSMContext)
         )
         return
     
-    add_temporary_cancellation(booking_id, date_str)
+    await add_temporary_cancellation(booking_id, date_str)
     
     days = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
     
@@ -2092,7 +1827,7 @@ async def recurring_cancel_forever(callback: types.CallbackQuery, state: FSMCont
     weekday = data.get('selected_booking_weekday')
     time_str = data.get('selected_booking_time')
     
-    deactivate_recurring_booking(booking_id)
+    await deactivate_recurring_booking(booking_id)
     
     days = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота', 'Воскресенье']
     
@@ -2182,14 +1917,15 @@ async def recurring_back_to_action(callback: types.CallbackQuery, state: FSMCont
     )
     await callback.answer()
 
-@dp.callback_query(lambda c: c.data == "check_slots")
-async def check_slots(callback: types.CallbackQuery):
-    if callback.from_user.id != TRAINER_ID:
-        await callback.answer("Нет доступа")
+# === ОТЛАДОЧНЫЕ КОМАНДЫ ===
+
+@dp.message(Command("check_slots"))
+async def check_slots(message: types.Message):
+    if message.from_user.id != TRAINER_ID:
         return
     
     next_monday, week_start, week_end = get_next_week_start()
-    free_slots = get_free_slots(week_start)
+    free_slots = await get_free_slots(week_start)
     
     if free_slots:
         slots_by_day = {}
@@ -2207,14 +1943,44 @@ async def check_slots(callback: types.CallbackQuery):
             text += f"📅 {day_name} {date}: {len(slots)} слотов\n"
         
         text += f"\n📊 Всего: {len(free_slots)} слотов"
-        await callback.message.edit_text(text, parse_mode="Markdown")
+        await message.answer(text, parse_mode="Markdown")
     else:
-        await callback.message.edit_text(
-            f"❌ *Нет свободных слотов на неделю {week_start}!*",
+        await message.answer(
+            f"❌ *Нет свободных слотов на неделю {week_start}!*\n\n"
+            f"Откройте запись через панель тренера → 📅 Открыть запись",
             parse_mode="Markdown"
         )
-    await callback.answer()
 
+@dp.message(Command("debug_slots"))
+async def debug_slots(message: types.Message):
+    if message.from_user.id != TRAINER_ID:
+        return
+    
+    current_monday, current_start, current_end = get_current_week_start()
+    current_slots = await get_all_slots_for_week(current_start)
+    
+    next_monday, next_start, next_end = get_next_week_start()
+    next_slots = await get_all_slots_for_week(next_start)
+    
+    text = "📊 *ОТЛАДКА СЛОТОВ*\n\n"
+    
+    text += f"📅 *Текущая неделя:* {current_start} - {current_end}\n"
+    text += f"📊 Слотов в БД: {len(current_slots)}\n"
+    if current_slots:
+        dates = set(s.split()[0] for s in current_slots)
+        text += f"📅 Даты: {', '.join(sorted(dates))}\n"
+    else:
+        text += "❌ НЕТ СЛОТОВ!\n"
+    
+    text += f"\n📅 *Следующая неделя:* {next_start} - {next_end}\n"
+    text += f"📊 Слотов в БД: {len(next_slots)}\n"
+    if next_slots:
+        dates = set(s.split()[0] for s in next_slots)
+        text += f"📅 Даты: {', '.join(sorted(dates))}\n"
+    else:
+        text += "❌ НЕТ СЛОТОВ!\n"
+    
+    await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Command("check_db"))
 async def check_db(message: types.Message):
@@ -2223,9 +1989,8 @@ async def check_db(message: types.Message):
     
     try:
         conn = await get_connection()
-        result = await conn.fetchval("SELECT 1")
+        await conn.fetchval("SELECT 1")
         await conn.close()
-        
         await message.answer(
             "✅ *База данных подключена успешно!*\n\n"
             f"📊 Тип БД: PostgreSQL (Supabase)\n"
@@ -2238,63 +2003,23 @@ async def check_db(message: types.Message):
             f"```\n{str(e)}\n```",
             parse_mode="Markdown"
         )
-        
-@dp.message(Command("healthcheck"))
-async def healthcheck(message: types.Message):
-    """Для проверки работоспособности бота на Render"""
-    if message.from_user.id == TRAINER_ID:
-        await message.answer("✅ Бот работает!")
-async def on_startup(app: web.Application):
-    """Устанавливает webhook при запуске бота"""
-    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
-    await bot.set_webhook(webhook_url)
-    print(f"✅ Webhook установлен на: {webhook_url}")
 
-async def on_shutdown(app: web.Application):
-    """Удаляет webhook при остановке"""
-    await bot.delete_webhook()
-    await bot.session.close()
-    print("🔴 Webhook удалён, бот остановлен")
-    
+# === ЗАПУСК БОТА ===
+
 async def main():
-    init_db()
-    print("🤖 Бот запускается в режиме WEBHOOK!")
+    """Главная функция запуска бота в режиме Polling"""
+    await init_db()
+    await cleanup_old_data()
+    
+    print("=" * 50)
+    print("🤖 БОТ ЗАПУЩЕН!")
+    print(f"📅 Дата и время: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
     print(f"👨‍💼 Тренер ID: {TRAINER_ID}")
+    print(f"💾 База данных: PostgreSQL (Supabase)")
+    print(f"📡 Режим работы: Polling (long polling)")
+    print("=" * 50)
     
-    # Создаём aiohttp приложение
-    app = web.Application()
-    
-    # Добавляем healthcheck для Render
-    async def healthcheck_handler(request):
-        return web.Response(text="OK", status=200)
-    app.router.add_get("/healthcheck", healthcheck_handler)
-    
-    # Настраиваем обработчик webhook
-    webhook_handler = SimpleRequestHandler(
-        dispatcher=dp,
-        bot=bot,
-    )
-    webhook_handler.register(app, path=WEBHOOK_PATH)
-    
-    # Настраиваем startup/shutdown хуки
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-    setup_application(app, dp, bot=bot)
-    
-    # Берём порт из переменной окружения
-    port = int(os.environ.get("PORT", 10000))
-    
-    # Запускаем сервер правильно (без вложенных event loop'ов)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, host="0.0.0.0", port=port)
-    await site.start()
-    
-    print(f"🚀 Сервер успешно запущен на порту {port}")
-    print(f"✅ Webhook должен быть зарегистрирован по адресу: https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}")
-    
-    # Бесконечно держим сервер включённым
-    await asyncio.Event().wait()
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
