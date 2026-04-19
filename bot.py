@@ -2215,6 +2215,30 @@ async def check_slots(callback: types.CallbackQuery):
         )
     await callback.answer()
 
+
+@dp.message(Command("check_db"))
+async def check_db(message: types.Message):
+    if message.from_user.id != TRAINER_ID:
+        return
+    
+    try:
+        conn = await get_connection()
+        result = await conn.fetchval("SELECT 1")
+        await conn.close()
+        
+        await message.answer(
+            "✅ *База данных подключена успешно!*\n\n"
+            f"📊 Тип БД: PostgreSQL (Supabase)\n"
+            f"🔗 Статус: Работает",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await message.answer(
+            f"❌ *Ошибка подключения к БД!*\n\n"
+            f"```\n{str(e)}\n```",
+            parse_mode="Markdown"
+        )
+        
 @dp.message(Command("healthcheck"))
 async def healthcheck(message: types.Message):
     """Для проверки работоспособности бота на Render"""
