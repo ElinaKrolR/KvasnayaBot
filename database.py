@@ -5,6 +5,7 @@ from typing import List, Dict, Optional
 
 # Получаем URL из переменных окружения
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+DB_NAME = "trainings.db"  # для совместимости со старым кодом
 
 async def get_connection():
     """Получить соединение с Supabase/PostgreSQL"""
@@ -75,7 +76,7 @@ async def init_db():
         )
     ''')
     
-    # Таблица временных отмен постоянных записей
+    # Таблица временных отмен
     await conn.execute('''
         CREATE TABLE IF NOT EXISTS recurring_cancellations (
             id SERIAL PRIMARY KEY,
@@ -85,7 +86,7 @@ async def init_db():
         )
     ''')
     
-    # Создаем индексы для ускорения
+    # Индексы
     await conn.execute('CREATE INDEX IF NOT EXISTS idx_trainings_user_id ON trainings(user_id)')
     await conn.execute('CREATE INDEX IF NOT EXISTS idx_trainings_datetime ON trainings(datetime)')
     await conn.execute('CREATE INDEX IF NOT EXISTS idx_open_slots_week_start ON open_slots(week_start)')
